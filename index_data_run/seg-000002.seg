@@ -1,0 +1,34 @@
+INDEXDB 1
+1
+dog
+Lazy Dog
+A lazy dog sleeps after chasing the fox.
+2 6
+title
+2
+dog
+1
+0 1 1 1
+lazy
+1
+0 1 1 0
+body
+6
+after
+1
+0 1 1 3
+chas
+1
+0 1 1 4
+dog
+1
+0 1 1 1
+fox
+1
+0 1 1 5
+lazy
+1
+0 1 1 0
+sleep
+1
+0 1 1 2

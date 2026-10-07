@@ -38,6 +38,14 @@ struct FlushInfo {
   std::size_t docs = 0;
 };
 
+// A memory batch this full is written to a segment file on its own.
+inline constexpr std::size_t kAutoFlushDocs = 8;
+
+struct PutResult {
+  std::size_t active_docs = 0;
+  FlushInfo flushed;
+};
+
 struct MergeInfo {
   std::string path;
   bool compacted = false;
@@ -49,7 +57,7 @@ class Engine {
  public:
   explicit Engine(std::string data_dir);
 
-  std::size_t put(std::string id, std::string title, std::string body);
+  PutResult put(std::string id, std::string title, std::string body);
   void remove(const std::string& id);
   std::optional<StoredDoc> get(const std::string& id) const;
   std::vector<StoredDoc> list() const;

@@ -45,7 +45,7 @@ indexdb> merge
 
 ## In memory until flush
 
-`put` keeps the new document in memory. `flush` writes that batch to a segment file in `index_data/`. Quit and start `./indexdb` again: flushed documents are still searchable. A document you never flushed is gone when the program exits. `quit` flushes on the way out.
+`put` keeps the new document in memory. After 8 documents the batch is saved on its own. `flush` writes the batch early. Quit and start `./indexdb` again: flushed documents are still searchable. A document you never flushed is gone when the program exits. `quit` flushes on the way out.
 
 ## Layout
 

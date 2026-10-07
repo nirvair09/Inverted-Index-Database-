@@ -56,7 +56,7 @@ Engine::Engine(std::string data_dir) : dir_(std::move(data_dir)) {
   remove_unreferenced();
 }
 
-std::size_t Engine::put(std::string id, std::string title, std::string body) {
+PutResult Engine::put(std::string id, std::string title, std::string body) {
   if (id.empty()) throw std::runtime_error("document id is empty");
   if (id.find('\n') != std::string::npos || id.find('\r') != std::string::npos) {
     throw std::runtime_error("document id cannot contain a newline");
@@ -65,7 +65,13 @@ std::size_t Engine::put(std::string id, std::string title, std::string body) {
   const auto title_tokens = analyzer_.analyze(title);
   const auto body_tokens = analyzer_.analyze(body);
   active_.add(std::move(id), std::move(title), std::move(body), title_tokens, body_tokens);
-  return active_.live_count();
+  PutResult result;
+  result.active_docs = active_.live_count();
+  if (result.active_docs >= kAutoFlushDocs) {
+    result.flushed = flush();
+    result.active_docs = active_.live_count();
+  }
+  return result;
 }
 
 void Engine::remove(const std::string& id) {

@@ -79,7 +79,8 @@ void print_hits(const indexdb::SearchResponse& response) {
 void print_help() {
   std::cout
       << "commands\n"
-      << "  put <id> \"<title>\" \"<body>\"   index a document\n"
+      << "  put <id> \"<title>\" \"<body>\"   index a document (saves a segment every "
+      << indexdb::kAutoFlushDocs << ")\n"
       << "  get <id>                        print one document\n"
       << "  del <id>                        tombstone a document\n"
       << "  list                            live documents\n"
@@ -122,8 +123,15 @@ void handle(indexdb::Engine& engine, const std::string& line) {
     if (args.size() != 3) {
       throw std::runtime_error("usage: put <id> \"<title>\" \"<body>\"");
     }
-    const std::size_t active = engine.put(args[0], args[1], args[2]);
-    std::cout << "ok  " << args[0] << "  (" << active << " in the active segment)\n";
+    const auto stored = engine.put(args[0], args[1], args[2]);
+    if (!stored.flushed.path.empty()) {
+      std::cout << "ok  " << args[0] << "  (auto-flushed "
+                << std::filesystem::path(stored.flushed.path).filename().string() << ", "
+                << stored.flushed.docs << " docs)\n";
+    } else {
+      std::cout << "ok  " << args[0] << "  (" << stored.active_docs
+                << " in the active segment)\n";
+    }
   } else if (cmd == "del") {
     const auto args = split_args(rest);
     if (args.size() != 1) throw std::runtime_error("usage: del <id>");
@@ -344,6 +352,20 @@ int run_demo() {
     expect_ids(again.search("immutable", 20), {"segments"}, "a reloaded segment still searches");
     std::cout << "\n";
     print_stats(stats);
+  }
+
+  {
+    indexdb::Engine batch((dir / "batch").string());
+    for (std::size_t i = 0; i < indexdb::kAutoFlushDocs; ++i) {
+      batch.put("d" + std::to_string(i), "Title " + std::to_string(i), "body fox number");
+    }
+    const auto stats = batch.stats();
+    expect(stats.sealed_segments == 1 && stats.active_docs == 0 &&
+               stats.live_docs == indexdb::kAutoFlushDocs,
+           "the 8th put writes a segment without an extra flush");
+    expect_ids(batch.search("fox", 20),
+               {"d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"},
+               "a search still sees the auto-flushed documents");
   }
 
   std::cout << "\n" << (failed == 0 ? "all checks passed\n" : "checks failed\n");
