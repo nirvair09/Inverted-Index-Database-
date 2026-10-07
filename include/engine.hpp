@@ -88,6 +88,10 @@ class Engine {
   void load_committed();
   void publish(const std::vector<std::string>& basenames) const;
   void remove_unreferenced() const;
+  void add_active(std::string id, std::string title, std::string body);
+  void append_translog(const std::string& record);
+  void clear_translog() const;
+  void replay_translog();
 
   std::string dir_;
   Analyzer analyzer_;

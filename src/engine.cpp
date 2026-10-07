@@ -1,12 +1,16 @@
 #include "engine.hpp"
 
 #include <algorithm>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 
@@ -55,6 +59,13 @@ Engine::Engine(std::string data_dir) : dir_(std::move(data_dir)) {
   fs::create_directories(dir_);
   load_committed();
   remove_unreferenced();
+  replay_translog();
+}
+
+void Engine::add_active(std::string id, std::string title, std::string body) {
+  const auto title_tokens = analyzer_.analyze(title);
+  const auto body_tokens = analyzer_.analyze(body);
+  active_.add(std::move(id), std::move(title), std::move(body), title_tokens, body_tokens);
 }
 
 PutResult Engine::put(std::string id, std::string title, std::string body) {
@@ -63,9 +74,9 @@ PutResult Engine::put(std::string id, std::string title, std::string body) {
     throw std::runtime_error("document id cannot contain a newline");
   }
   if (find_segment(id) != nullptr) throw std::runtime_error("document already indexed: " + id);
-  const auto title_tokens = analyzer_.analyze(title);
-  const auto body_tokens = analyzer_.analyze(body);
-  active_.add(std::move(id), std::move(title), std::move(body), title_tokens, body_tokens);
+  append_translog("PUT\n" + escape_text(id) + "\n" + escape_text(title) + "\n" + escape_text(body) +
+                  "\n");
+  add_active(std::move(id), std::move(title), std::move(body));
   PutResult result;
   result.active_docs = active_.live_count();
   if (result.active_docs >= kAutoFlushDocs) {
@@ -79,8 +90,12 @@ void Engine::remove(const std::string& id) {
   std::size_t sealed_index = 0;
   Segment* segment = find_segment(id, &sealed_index);
   if (segment == nullptr) throw std::runtime_error("no such document: " + id);
+  if (segment == &active_) {
+    append_translog("DEL\n" + escape_text(id) + "\n");
+    segment->kill(id);
+    return;
+  }
   segment->kill(id);
-  if (segment == &active_) return;
   std::ofstream out(sealed_[sealed_index].path + ".dead", std::ios::app);
   if (!out) throw std::runtime_error("cannot write tombstone for " + id);
   out << escape_text(id) << '\n';
@@ -138,11 +153,31 @@ SearchResponse Engine::search(const std::string& query, std::size_t limit) const
     }
   }
 
-  std::vector<SearchHit> hits;
-  for (const Segment* segment : segments) {
+  auto collect = [&](const Segment* segment) {
+    std::vector<SearchHit> local;
     for (const ScoredDoc& scored : execute(*segment, root, sim)) {
       const StoredDoc& doc = segment->docs()[scored.doc];
-      hits.push_back(SearchHit{doc.id, doc.title, doc.body, scored.score});
+      local.push_back(SearchHit{doc.id, doc.title, doc.body, scored.score});
+    }
+    return local;
+  };
+
+  std::vector<SearchHit> hits;
+  if (segments.size() <= 1) {
+    for (const Segment* segment : segments) {
+      auto local = collect(segment);
+      hits.insert(hits.end(), local.begin(), local.end());
+    }
+  } else {
+    std::vector<std::future<std::vector<SearchHit>>> jobs;
+    jobs.reserve(segments.size());
+    for (const Segment* segment : segments) {
+      jobs.push_back(std::async(std::launch::async, collect, segment));
+    }
+    for (auto& job : jobs) {
+      auto local = job.get();
+      hits.insert(hits.end(), std::make_move_iterator(local.begin()),
+                  std::make_move_iterator(local.end()));
     }
   }
   std::sort(hits.begin(), hits.end(), [](const SearchHit& a, const SearchHit& b) {
@@ -162,7 +197,10 @@ FlushInfo Engine::flush() {
   if (active_.docs().empty()) return info;
   Segment cleaned = Segment::merge_all({&active_});
   active_ = Segment{};
-  if (cleaned.docs().empty()) return info;
+  if (cleaned.docs().empty()) {
+    clear_translog();
+    return info;
+  }
   info.docs = cleaned.docs().size();
   info.path = new_segment_path();
   cleaned.save(info.path);
@@ -171,6 +209,7 @@ FlushInfo Engine::flush() {
   names.reserve(sealed_.size());
   for (const auto& sealed : sealed_) names.push_back(basename_of(sealed.path));
   publish(names);
+  clear_translog();
   return info;
 }
 
@@ -251,6 +290,7 @@ Stats Engine::stats() const {
   stats.sealed_segments = sealed_.size();
   stats.active_docs = active_.live_count();
   stats.bytes_on_disk = file_bytes(fs::path(dir_) / "manifest");
+  stats.bytes_on_disk += file_bytes(fs::path(dir_) / "translog");
   auto take = [&](const Segment& segment, bool on_disk, const std::string& path) {
     stats.live_docs += segment.live_count();
     stats.dead_docs += segment.docs().size() - segment.live_count();
@@ -332,6 +372,61 @@ void Engine::publish(const std::vector<std::string>& basenames) const {
     if (!out) throw std::runtime_error("cannot write manifest in " + dir_);
   }
   fs::rename(tmp, final);
+}
+
+void Engine::append_translog(const std::string& record) {
+  const std::string path = (fs::path(dir_) / "translog").string();
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd < 0) throw std::runtime_error("cannot write translog in " + dir_);
+  std::size_t written = 0;
+  while (written < record.size()) {
+    const ssize_t n = ::write(fd, record.data() + written, record.size() - written);
+    if (n < 0) {
+      ::close(fd);
+      throw std::runtime_error("cannot write translog in " + dir_);
+    }
+    written += static_cast<std::size_t>(n);
+  }
+  if (::fsync(fd) != 0) {
+    ::close(fd);
+    throw std::runtime_error("cannot sync translog in " + dir_);
+  }
+  ::close(fd);
+}
+
+void Engine::clear_translog() const {
+  std::error_code ec;
+  fs::remove(fs::path(dir_) / "translog", ec);
+}
+
+void Engine::replay_translog() {
+  std::ifstream in(fs::path(dir_) / "translog");
+  if (!in) return;
+  auto read_line = [&](std::string& line) {
+    if (!std::getline(in, line)) return false;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    return true;
+  };
+  std::string kind;
+  while (read_line(kind)) {
+    if (kind.empty()) continue;
+    if (kind == "PUT") {
+      std::string id;
+      std::string title;
+      std::string body;
+      if (!read_line(id) || !read_line(title) || !read_line(body)) break;
+      id = unescape_text(id);
+      if (find_segment(id) != nullptr) continue;
+      add_active(std::move(id), unescape_text(title), unescape_text(body));
+    } else if (kind == "DEL") {
+      std::string id;
+      if (!read_line(id)) break;
+      id = unescape_text(id);
+      if (active_.find_live(id) != nullptr) active_.kill(id);
+    } else {
+      break;
+    }
+  }
 }
 
 void Engine::remove_unreferenced() const {

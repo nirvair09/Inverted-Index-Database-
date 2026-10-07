@@ -389,6 +389,21 @@ int run_demo() {
            "documents from both the merged file and the large file are still there");
   }
 
+  {
+    const std::string crash_dir = (dir / "translog").string();
+    {
+      indexdb::Engine first(crash_dir);
+      first.put("keep", "Keep", "still here after a crash");
+      first.put("drop", "Drop", "deleted before the crash");
+      first.remove("drop");
+    }
+    indexdb::Engine second(crash_dir);
+    const auto stats = second.stats();
+    expect(second.get("keep").has_value() && !second.get("drop").has_value() &&
+               stats.sealed_segments == 0 && stats.active_docs == 1,
+           "a restart replays the translog and keeps an unflushed document");
+  }
+
   std::cout << "\n" << (failed == 0 ? "all checks passed\n" : "checks failed\n");
   return failed == 0 ? 0 : 1;
 }

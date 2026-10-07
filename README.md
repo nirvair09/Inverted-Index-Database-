@@ -16,7 +16,7 @@ Needs g++ with C++17. The binary is `indexdb`.
 - **Positional postings.** A term maps to `(doc, term frequency, positions)`. Positions make `"quick brown"` match only when those stems sit next to each other. `"fox brown"` does not match.
 - **Boolean execution by merging sorted lists.** `AND` is a two-pointer intersection, `OR` a union, `-dog` a subtraction. A bare `NOT` matches nothing, because there is no match-all.
 - **BM25, with stats summed across segments.** Score uses `tf`, document length, and `log(1 + (N - df + 0.5) / (df + 0.5))`. Document frequency is counted over every open segment, so a hit in an old segment and a hit in the active one are comparable. The **title field is boosted ×2**. Shorter fields rank a bit higher, which is why `City Foxes` beats `Quick Brown Fox` on the query `fox`.
-- **Immutable segments and a manifest commit.** `put` fills an in-memory active segment. `flush` writes `seg-000001.seg` and only then renames `manifest` onto it. A segment counts once its name is in the manifest. Search reads every committed segment plus the active one.
+- **Immutable segments and a manifest commit.** `put` fills an in-memory active segment. `flush` writes `seg-000001.seg` and only then renames `manifest` onto it. A segment counts once its name is in the manifest. Search reads every committed segment plus the active one at the same time, then sorts the combined hits.
 - **Tombstones, dropped on merge.** `del` of a sealed document appends its id to a `.dead` sidecar and does not rewrite postings. Search skips it immediately. `merge` combines segments of similar size, where the biggest is at most twice the smallest, into one new segment and leaves a much larger segment in place. Dead documents are not copied. The new manifest names the files that remain.
 
 ## Prompt
@@ -45,7 +45,7 @@ indexdb> merge
 
 ## In memory until flush
 
-`put` keeps the new document in memory. After 8 documents the batch is saved on its own. `flush` writes the batch early. Quit and start `./indexdb` again: flushed documents are still searchable. A document you never flushed is gone when the program exits. `quit` flushes on the way out.
+`put` keeps the new document in memory and also appends it to a `translog` file, so a crash before `flush` does not lose it. The next start replays that log. After 8 documents the batch is saved on its own, and the log is cleared. `flush` writes the batch early. `quit` flushes on the way out.
 
 ## Layout
 
