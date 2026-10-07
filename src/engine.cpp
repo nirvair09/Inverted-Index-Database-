@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -173,39 +174,75 @@ FlushInfo Engine::flush() {
   return info;
 }
 
+std::vector<std::size_t> Engine::pick_merge_group() const {
+  struct Item {
+    std::size_t index = 0;
+    std::size_t live = 0;
+    bool dead = false;
+  };
+  std::vector<Item> items;
+  items.reserve(sealed_.size());
+  for (std::size_t i = 0; i < sealed_.size(); ++i) {
+    items.push_back(Item{i, sealed_[i].segment.live_count(), sealed_[i].segment.has_dead()});
+  }
+  std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+    if (a.live != b.live) return a.live < b.live;
+    return a.index < b.index;
+  });
+
+  std::vector<std::size_t> tier;
+  const std::size_t smallest = items.front().live;
+  const std::size_t limit = smallest > std::numeric_limits<std::size_t>::max() / kMergeSizeFactor
+                                ? std::numeric_limits<std::size_t>::max()
+                                : smallest * kMergeSizeFactor;
+  for (const Item& item : items) {
+    if (item.live > limit) break;
+    tier.push_back(item.index);
+  }
+  if (tier.size() >= 2) return tier;
+
+  for (const Item& item : items) {
+    if (item.dead) return {item.index};
+  }
+  return {};
+}
+
 MergeInfo Engine::merge() {
   flush();
   MergeInfo info;
+  info.segments = sealed_.size();
   if (sealed_.empty()) return info;
 
-  bool any_dead = false;
-  for (const auto& sealed : sealed_) {
-    if (sealed.segment.has_dead()) any_dead = true;
-  }
-  if (sealed_.size() == 1 && !any_dead) {
-    info.path = sealed_[0].path;
+  const std::vector<std::size_t> group = pick_merge_group();
+  if (group.empty()) {
+    if (sealed_.size() == 1) info.path = sealed_[0].path;
     return info;
   }
 
+  std::unordered_set<std::size_t> chosen(group.begin(), group.end());
   std::vector<const Segment*> parts;
-  parts.reserve(sealed_.size());
-  for (const auto& sealed : sealed_) parts.push_back(&sealed.segment);
-  Segment merged = Segment::merge_all(parts);
-  if (merged.docs().empty()) {
-    sealed_.clear();
-    publish({});
-    remove_unreferenced();
-    info.compacted = true;
-    return info;
-  }
+  parts.reserve(group.size());
+  for (std::size_t index : group) parts.push_back(&sealed_[index].segment);
 
-  info.path = new_segment_path();
+  Segment merged = Segment::merge_all(parts);
   info.compacted = true;
-  merged.save(info.path);
-  sealed_.clear();
-  sealed_.push_back(Sealed{info.path, std::move(merged)});
-  publish({basename_of(info.path)});
+  if (!merged.docs().empty()) {
+    info.path = new_segment_path();
+    merged.save(info.path);
+  }
+  std::vector<Sealed> kept;
+  kept.reserve(sealed_.size() - group.size() + 1);
+  for (std::size_t i = 0; i < sealed_.size(); ++i) {
+    if (!chosen.count(i)) kept.push_back(std::move(sealed_[i]));
+  }
+  if (!info.path.empty()) kept.push_back(Sealed{info.path, std::move(merged)});
+  sealed_ = std::move(kept);
+  std::vector<std::string> names;
+  names.reserve(sealed_.size());
+  for (const auto& sealed : sealed_) names.push_back(basename_of(sealed.path));
+  publish(names);
   remove_unreferenced();
+  info.segments = sealed_.size();
   return info;
 }
 

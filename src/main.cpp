@@ -86,7 +86,7 @@ void print_help() {
       << "  list                            live documents\n"
       << "  search <query>                  rank with BM25\n"
       << "  flush                           seal the active segment to disk\n"
-      << "  merge                           compact segments, drop tombstones\n"
+      << "  merge                           combine similar-sized segments, drop tombstones\n"
       << "  stats\n"
       << "  help\n"
       << "  quit\n"
@@ -164,12 +164,12 @@ void handle(indexdb::Engine& engine, const std::string& line) {
     }
   } else if (cmd == "merge") {
     const auto info = engine.merge();
-    if (info.path.empty() && !info.compacted) std::cout << "no segments on disk\n";
-    else if (!info.compacted) std::cout << "already one segment\n";
-    else if (info.path.empty()) std::cout << "merged to an empty index\n";
-    else {
+    if (info.compacted && info.path.empty()) std::cout << "merged to an empty index\n";
+    else if (info.compacted) {
       std::cout << "merged into " << std::filesystem::path(info.path).filename().string() << "\n";
-    }
+    } else if (info.segments == 0) std::cout << "no segments on disk\n";
+    else if (info.segments == 1) std::cout << "already one segment\n";
+    else std::cout << "left the larger segment alone\n";
   } else if (cmd == "stats") {
     print_stats(engine.stats());
   } else if (cmd == "quit" || cmd == "exit") {
@@ -366,6 +366,27 @@ int run_demo() {
     expect_ids(batch.search("fox", 20),
                {"d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"},
                "a search still sees the auto-flushed documents");
+  }
+
+  {
+    indexdb::Engine tiers((dir / "tiers").string());
+    tiers.put("a", "Small A", "alpha document");
+    tiers.put("b", "Small B", "alpha document");
+    tiers.flush();
+    tiers.put("c", "Small C", "alpha document");
+    tiers.put("d", "Small D", "alpha document");
+    tiers.flush();
+    for (int i = 0; i < 8; ++i) {
+      tiers.put("big" + std::to_string(i), "Big", "beta document " + std::to_string(i));
+    }
+    const auto before = tiers.stats();
+    const auto merged = tiers.merge();
+    const auto after = tiers.stats();
+    expect(before.sealed_segments == 3 && merged.compacted && after.sealed_segments == 2 &&
+               after.live_docs == 12 && after.dead_docs == 0,
+           "merge combines the two small segments and leaves the big one");
+    expect(tiers.get("a").has_value() && tiers.get("big0").has_value(),
+           "documents from both the merged file and the large file are still there");
   }
 
   std::cout << "\n" << (failed == 0 ? "all checks passed\n" : "checks failed\n");

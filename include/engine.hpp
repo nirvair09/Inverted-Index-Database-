@@ -41,6 +41,10 @@ struct FlushInfo {
 // A memory batch this full is written to a segment file on its own.
 inline constexpr std::size_t kAutoFlushDocs = 8;
 
+// Merge a group only when the biggest segment in it is at most this many
+// times the smallest. A much larger segment stays as its own file.
+inline constexpr std::size_t kMergeSizeFactor = 2;
+
 struct PutResult {
   std::size_t active_docs = 0;
   FlushInfo flushed;
@@ -49,6 +53,7 @@ struct PutResult {
 struct MergeInfo {
   std::string path;
   bool compacted = false;
+  std::size_t segments = 0;
 };
 
 // Tiny search database: an in-memory active segment, sealed segment files,
@@ -79,6 +84,7 @@ class Engine {
   const Segment* find_segment(const std::string& id) const;
   std::vector<const Segment*> snapshot() const;
   std::string new_segment_path() const;
+  std::vector<std::size_t> pick_merge_group() const;
   void load_committed();
   void publish(const std::vector<std::string>& basenames) const;
   void remove_unreferenced() const;

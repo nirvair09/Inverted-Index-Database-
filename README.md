@@ -17,7 +17,7 @@ Needs g++ with C++17. The binary is `indexdb`.
 - **Boolean execution by merging sorted lists.** `AND` is a two-pointer intersection, `OR` a union, `-dog` a subtraction. A bare `NOT` matches nothing, because there is no match-all.
 - **BM25, with stats summed across segments.** Score uses `tf`, document length, and `log(1 + (N - df + 0.5) / (df + 0.5))`. Document frequency is counted over every open segment, so a hit in an old segment and a hit in the active one are comparable. The **title field is boosted ×2**. Shorter fields rank a bit higher, which is why `City Foxes` beats `Quick Brown Fox` on the query `fox`.
 - **Immutable segments and a manifest commit.** `put` fills an in-memory active segment. `flush` writes `seg-000001.seg` and only then renames `manifest` onto it. A segment counts once its name is in the manifest. Search reads every committed segment plus the active one.
-- **Tombstones, dropped on merge.** `del` of a sealed document appends its id to a `.dead` sidecar and does not rewrite postings. Search skips it immediately. `merge` rewrites the survivors into one new segment, publishes a new manifest, and deletes the old files.
+- **Tombstones, dropped on merge.** `del` of a sealed document appends its id to a `.dead` sidecar and does not rewrite postings. Search skips it immediately. `merge` combines segments of similar size, where the biggest is at most twice the smallest, into one new segment and leaves a much larger segment in place. Dead documents are not copied. The new manifest names the files that remain.
 
 ## Prompt
 
